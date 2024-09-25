@@ -1,6 +1,4 @@
 use std::any::TypeId;
-use std::marker::Tuple;
-use std::ops::{AsyncFnMut, AsyncFnOnce};
 use std::sync::Arc;
 use async_trait::async_trait;
 use crate::any::KAny;
@@ -210,30 +208,6 @@ impl EventNya for LifecycleEvent {
 pub(crate) trait HandlerTrait<E: EventNya>: sealed::Handler {
     async fn handle(&mut self, data: E::Args) -> color_eyre::Result<E::Result>;
 }
-
-macro_rules! impl_handler {
-    ($ty:ident) => {
-        impl<F> sealed::Handler for F
-            where
-                F: AsyncFnMut<<$ty as EventNya>::Args>
-            {}
-
-        #[async_trait]
-        impl<F> HandlerTrait<$ty> for F
-        where
-            F: AsyncFnMut<<$ty as EventNya>::Args>,
-        {
-            async fn handle(&mut self, data: E::Args) -> color_eyre::Result<E::Result> {
-                self.async_call_mut(data).await
-            }
-        }
-    };
-}
-
-
-
-
-
 
 #[async_trait]
 pub(crate) trait Handler : Send + Sync {

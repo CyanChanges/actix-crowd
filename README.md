@@ -32,9 +32,15 @@ TODO...
     1. [ ] Event Handling
     2. [ ] Event emitting
     3. [ ] Async & Sync Interface
+    4. [ ] Internal events 
 2. [ ] Resource management
     1. [x] Scope dispose - `Scope::dispose`
-    2. [ ] Disposables - `Context::effect`
-    3. [ ] Service
-    4. [ ] ...
+    2. [ ] Scope resources
+    3. [ ] Disposables - `Context::effect`
+    4. [ ] Service
+    5. [ ] ...
+3. [ ] PnP
+    1. Dyn Plugin(library) loading
+    2. HMR
+    3. ...
 

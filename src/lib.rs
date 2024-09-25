@@ -21,7 +21,11 @@ mod utils;
 mod result;
 mod tasker;
 
-pub mod prelude {}
+pub mod prelude {
+    pub use crate::context::Cortex;
+    pub use crate::plugin::Plugin;
+    pub use crate::events::EventMessage;
+}
 
 #[cfg(test)]
 mod tests;

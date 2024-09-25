@@ -24,6 +24,7 @@ impl<T> LateInit<T> {
     pub fn new<F: FnOnce() -> T + Send + Sync>(func: F) -> Self {
         let boxed: Box<dyn FnOnce() -> T + Send + Sync> = Box::new(func);
         let leaked = Box::leak(boxed);
+        // It's fine you know
         let ptr = cve_rs::transmute::<&mut (dyn FnOnce() -> T + Send + Sync), *mut (dyn FnOnce() -> T + Send + Sync)>(leaked);
 
         LateInit {
@@ -35,7 +36,7 @@ impl<T> LateInit<T> {
     pub fn ensure_initialized(&self) {
         if !self.once.is_completed() {
             self.once.call_once(|| unsafe {
-                let data = unsafe { &mut *self.data.get() };
+                let data = &mut *self.data.get();
                 let val = ManuallyDrop::take(&mut data.f)();
                 data.value = ManuallyDrop::new(val);
             })
@@ -57,7 +58,7 @@ impl<T> LateInit<T> {
     }
 
 
-    pub(crate) unsafe fn hacked_state(&self) -> ExclusiveState {
+    pub(crate) unsafe fn hack_state(&self) -> ExclusiveState {
         const INCOMPLETE: u32 = 0;
         /// Some thread has previously attempted to initialize the Once, but it panicked,
         /// so the Once is now poisoned. There are no other threads currently accessing
@@ -79,7 +80,7 @@ impl<T> LateInit<T> {
             INCOMPLETE => ExclusiveState::Incomplete,
             POISONED => ExclusiveState::Poisoned,
             COMPLETE => ExclusiveState::Complete,
-            _ => unreachable!("unhappy :("),
+            _ => unreachable!("illegal state, is your operating system a off-brand?"),
         }
     }
 }
@@ -113,7 +114,7 @@ impl<T> DerefMut for LateInit<T> {
 impl<T> Drop for LateInit<T> {
     fn drop(&mut self) {
         unsafe {
-            match self.hacked_state() {
+            match self.hack_state() {
                 ExclusiveState::Incomplete => ManuallyDrop::drop(&mut self.data.get_mut().f),
                 ExclusiveState::Complete => ManuallyDrop::drop(&mut self.data.get_mut().value),
                 ExclusiveState::Poisoned => {}

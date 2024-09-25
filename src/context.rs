@@ -22,7 +22,7 @@ use std::panic::UnwindSafe;
 use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam::atomic::AtomicCell;
-use futures::{future, Future, FutureExt};
+use futures::{Future, FutureExt};
 use crate::result::CrowdError;
 use crate::tasker::{Task, Tasker};
 
@@ -70,7 +70,7 @@ impl Eq for MainScope {}
 
 impl MainScope {
     pub(crate) fn new(context: Arc<Cortex>, plugin: Option<impl Plugin + 'static>) -> Arc<MainScope> {
-        Arc::new_cyclic(|weak| MainScope {
+        Arc::new(MainScope {
             id: AtomicCell::new(Some(context.registry.counter.fetch())),
             name: Some(Arc::from("root")),
             context: Arc::downgrade(&context),
@@ -85,7 +85,7 @@ impl MainScope {
     }
 
     pub fn id(&self) -> usize {
-        self.id.load().unwrap_or_else(|| usize::MAX)
+        self.id.load().unwrap_or(usize::MAX)
     }
 
     pub fn plugin(&self) -> Option<&dyn Plugin> {
@@ -166,7 +166,7 @@ impl Lifecycle {
             let weak = weak.clone();
             Self {
                 uid: AtomicCell::new(Some(uid)),
-                state: LazyUpdate::new(move |prev| {
+                state: LazyUpdate::new(move |_prev| {
                     let this = weak.upgrade().unwrap();
                     if this.uid.load().is_none() { return ScopeState::Disposed; }
                     if this.status.has_error() { return ScopeState::Failed; }
@@ -222,7 +222,7 @@ impl Eq for Scope {}
 impl Scope {
     pub(crate) fn new<T: Send + Sync + ?Sized + 'static>(runtime: Arc<MainScope>, context: Arc<Cortex>, config: Arc<T>, worker_count: u8) -> Arc<Self> {
         let id = context.registry.counter.fetch();
-        let mut this = Arc::new_cyclic(|weak| Self {
+        let mut this = Arc::new(Self {
             context: Arc::downgrade(&context),
             config: Arc::new(config),
             runtime: runtime.clone(),
@@ -254,13 +254,13 @@ impl Scope {
             cve_rs::transmute::<Box<dyn Future<Output=Result<(), result::Error>> + Send + Unpin>,
                 Box<dyn Future<Output=Result<(), result::Error>> + Send + Sync + UnwindSafe + Unpin>>(
                 Box::new(rt.plugin.as_ref().unwrap().apply(cortex)
-                    .map(|r| r.map_err(|e| result::Error::Other(e)))
+                    .map(|r| r.map_err(result::Error::Other))
                 ))
         });
     }
 
     pub fn id(&self) -> usize {
-        self.lifecycle.id().unwrap_or_else(|| usize::MAX)
+        self.lifecycle.id().unwrap_or(usize::MAX)
     }
 
     pub fn ensure<F, Fut>(&self, callback: F)
@@ -315,10 +315,8 @@ impl Scope {
     pub fn dispose(self: &Arc<Scope>) -> bool {
         let result = self.runtime.children.remove(self).is_some();
         self.lifecycle.notify_dispose();
-        if self.runtime.children.is_empty() {
-            if self.runtime.plugin.is_some() {
-                self.ctx().registry.delete(self.runtime.plugin.as_ref().unwrap().deref());
-            }
+        if self.runtime.children.is_empty() && self.runtime.plugin.is_some() {
+            self.ctx().registry.delete(self.runtime.plugin.as_ref().unwrap().deref());
         }
         result
     }
@@ -334,6 +332,7 @@ pub struct Cortex {
 
 unsafe impl Send for Cortex {}
 unsafe impl Sync for Cortex {}
+impl UnwindSafe for Cortex {}
 
 impl PartialEq for Cortex {
     fn eq(&self, other: &Self) -> bool {
@@ -349,7 +348,7 @@ impl Cortex {
     #[allow(clippy::uninit_assumed_init)]
     pub fn new(config: Arc<impl KAny>) -> Arc<Self> {
         let _ = tokio::runtime::Handle::try_current().expect("expect a tokio runtime");
-        let mut ctx = Arc::new_cyclic(|weak| Cortex {
+        let ctx = Arc::new_cyclic(|weak| Cortex {
             root: weak.clone(),
             parent: weak.clone(),
             registry: Arc::new(Registry::new(weak.clone(), Arc::new(config.clone()))),
@@ -389,6 +388,12 @@ impl Cortex {
         while !self.runtime().children.is_empty() {
             tokio::task::yield_now().await
         }
+    }
+}
+
+impl fmt::Display for Cortex {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cortex<{}>", self.runtime().name.as_deref().unwrap_or("anonymous"))
     }
 }
 

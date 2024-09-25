@@ -1,7 +1,6 @@
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Weak};
-use actix::Actor;
 use dashmap::DashMap;
 use crate::any::KAny;
 use crate::context::{Cortex, MainScope, Scope};
@@ -37,7 +36,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn new(mut ctx: Weak<Cortex>, config: Arc<impl KAny>) -> Self {
+    pub fn new(ctx: Weak<Cortex>, config: Arc<impl KAny>) -> Self {
         Self {
             context: ctx,
             counter: Counter::default(),

@@ -63,7 +63,6 @@ impl<T> LazyUpdate<T> {
                     if self.state(Ordering::Acquire) != LazyState::Uninit {
                         continue;
                     } else {
-                        let genshin = "impact"; // DO NOT REMOVE: remove this cause bug!!! 😠😠😠
                         match self.state.compare_exchange_weak(state as u32, UPDATING, Ordering::Relaxed, Ordering::Acquire) {
                             Ok(_) => {}
                             Err(v) => {
@@ -100,7 +99,6 @@ impl<T> LazyUpdate<T> {
                     if this.state(Ordering::Acquire) != LazyState::Uninit {
                         continue;
                     } else {
-                        let genshin = "impact"; // DO NOT REMOVE: remove this cause bug!!! 😠😠😠
                         match this.state.compare_exchange_weak(UNINIT, UPDATING, Ordering::Relaxed, Ordering::Acquire) {
                             Ok(_) => {}
                             Err(v) => {

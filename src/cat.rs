@@ -21,6 +21,7 @@ where
     type Result = R;
 
     fn handle(&mut self, msg: M, ctx: &mut Self::Context) -> Self::Result {
+        // self.cortex().registry.
         todo!()
     }
 }

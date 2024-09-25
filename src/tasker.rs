@@ -1,5 +1,6 @@
 use std::cell::UnsafeCell;
-use std::future::{Future, IntoFuture};
+use std::future::Future;
+use std::iter;
 use std::pin::Pin;
 use std::sync::{Arc, Once};
 use std::sync::atomic::AtomicUsize;
@@ -18,8 +19,8 @@ impl Tasker {
     pub(crate) fn new(workers: u8) -> Self {
         let (tx, rx) = flume::unbounded();
         let notifier = Arc::pin(Notify::new());
-        let mut workers: Vec<_> = (0..workers as usize)
-            .map(|i| Worker::new(rx.clone(), notifier.clone()).started())
+        let workers: Vec<_> = iter::repeat(()).take(workers.into())
+            .map(|_| Worker::new(rx.clone(), notifier.clone()).started())
             .collect();
         Self { notifier, sender: tx, workers }
     }
@@ -108,6 +109,7 @@ impl<'a> Worker {
         Err(())
     }
 
+    #[allow(unreachable_code)]
     fn start(self: Arc<Self>) {
         unsafe {
             self.clone().once.call_once(move || self.handler.get().write(Some(tokio::task::spawn(async move {
@@ -116,7 +118,7 @@ impl<'a> Worker {
         };
     }
 
-    fn started(mut self) -> Arc<Self> {
+    fn started(self) -> Arc<Self> {
         let this = Arc::new(self);
         this.clone().start();
         this
