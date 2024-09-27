@@ -1,6 +1,3 @@
-use core::fmt;
-use std::cell::UnsafeCell;
-use std::fmt::Formatter;
 use crate::any::KAny;
 use crate::cat::Cat;
 use crate::events::Handler;
@@ -8,23 +5,26 @@ use crate::plugin::Plugin;
 use crate::pnp::Pluggable;
 use crate::registry::Registry;
 use crate::result;
+use crate::result::CrowdError;
+use crate::tasker::{Task, Tasker};
 use crate::utils::lazy::LazyUpdate;
 use crate::utils::LateInit;
 use actix::{Actor, Addr, Message};
+use core::fmt;
+use crossbeam::atomic::AtomicCell;
 use dashmap::{DashMap, DashSet};
+use futures::{Future, FutureExt};
+use std::cell::UnsafeCell;
+use std::fmt::Formatter;
 use std::future::IntoFuture;
 use std::hash::{Hash, Hasher};
-use tokio::sync as concurrent;
-use std::mem;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::panic::UnwindSafe;
-use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
-use crossbeam::atomic::AtomicCell;
-use futures::{Future, FutureExt};
-use crate::result::CrowdError;
-use crate::tasker::{Task, Tasker};
+use std::sync::{Arc, Mutex, Weak};
+use std::{mem, ptr};
+use tokio::sync as concurrent;
 
 const WORKER_COUNT: u8 = 1;
 
@@ -53,23 +53,34 @@ impl fmt::Debug for MainScope {
         let uid = self.id.load().unwrap();
         match self.children.len() {
             0 => write!(f, "rt<id={uid} children=[]>"),
-            1 => write!(f, "rt<id={uid} children=[{:?}]>", self.children.iter().next().unwrap().deref()),
-            _ => write!(f, "rt<id={uid} children=[{:?}...{n} remains]>", self.children.iter().next().unwrap().deref(), n = self.children.len() - 1)
+            1 => write!(
+                f,
+                "rt<id={uid} children=[{:?}]>",
+                self.children.iter().next().unwrap().deref()
+            ),
+            _ => write!(
+                f,
+                "rt<id={uid} children=[{:?}...{n} remains]>",
+                self.children.iter().next().unwrap().deref(),
+                n = self.children.len() - 1
+            ),
         }
     }
 }
 
 impl PartialEq for MainScope {
     fn eq(&self, other: &Self) -> bool {
-        self.plugin == other.plugin &&
-            self.id() == other.id()
+        self.plugin == other.plugin && self.id() == other.id()
     }
 }
 
 impl Eq for MainScope {}
 
 impl MainScope {
-    pub(crate) fn new(context: Arc<Cortex>, plugin: Option<impl Plugin + 'static>) -> Arc<MainScope> {
+    pub(crate) fn new(
+        context: Arc<Cortex>,
+        plugin: Option<impl Plugin + 'static>,
+    ) -> Arc<MainScope> {
         Arc::new(MainScope {
             id: AtomicCell::new(Some(context.registry.counter.fetch())),
             name: Some(Arc::from("root")),
@@ -80,12 +91,21 @@ impl MainScope {
         })
     }
 
-    pub fn fork(self: Arc<MainScope>, parent: Arc<Cortex>, config: Arc<impl KAny + ?Sized>) -> Arc<Scope> {
+    pub fn fork(
+        self: Arc<MainScope>,
+        parent: Arc<Cortex>,
+        config: Arc<impl KAny + ?Sized>,
+    ) -> Arc<Scope> {
         Scope::new(self.clone(), parent, config, WORKER_COUNT)
     }
 
-    pub fn id(&self) -> usize {
+    #[deprecated(note = "this method is deprecated, please use `MainScope::id()` instead")]
+    pub fn _id_int(&self) -> usize {
         self.id.load().unwrap_or(usize::MAX)
+    }
+
+    pub fn id(&self) -> Option<usize> {
+        self.id.load()
     }
 
     pub fn plugin(&self) -> Option<&dyn Plugin> {
@@ -104,6 +124,24 @@ pub struct Scope {
     context: Weak<Cortex>,
     config: Arc<dyn KAny>,
     handlers: Arc<DashMap<usize, Arc<dyn Handler>>>,
+}
+
+impl Hash for MainScope {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.context.upgrade()
+            .as_ref()// The root context should be the same
+            .map(|upgraded|&upgraded.root)
+            .map(Weak::as_ptr)
+            .hash(state);
+        self.plugin // The plugin instance should be the same
+            .as_ref()
+            .map(Arc::as_ptr)
+            .hash(state);
+        match self.id() { // The id has to be the same
+            None => state.write_i128(-1),
+            Some(id) => state.write_usize(id),
+        };
+    }
 }
 
 impl fmt::Debug for Scope {
@@ -134,7 +172,9 @@ impl LifeStatus {
 
     fn set_error(&self, err: result::Error) {
         let _guard = self.mutex.lock();
-        unsafe { self.error.get().write(Some(err)); }
+        unsafe {
+            self.error.get().write(Some(err));
+        }
     }
 }
 
@@ -151,11 +191,21 @@ pub struct Lifecycle {
 impl fmt::Debug for Lifecycle {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if self.status.is_active() {
-            write!(f, "<active uid={uid} state={state:?}>", uid = self.uid.load().unwrap(), state = self.state.get())
+            write!(
+                f,
+                "<active uid={uid} state={state:?}>",
+                uid = self.uid.load().unwrap(),
+                state = self.state.get()
+            )
         } else if self.disposed.load(Ordering::Relaxed) {
             write!(f, "<disposed uid=None>")
         } else {
-            write!(f, "<uid={uid} state={state:?}>", uid = self.uid.load().unwrap(), state = self.state.get())
+            write!(
+                f,
+                "<uid={uid} state={state:?}>",
+                uid = self.uid.load().unwrap(),
+                state = self.state.get()
+            )
         }
     }
 }
@@ -168,9 +218,15 @@ impl Lifecycle {
                 uid: AtomicCell::new(Some(uid)),
                 state: LazyUpdate::new(move |_prev| {
                     let this = weak.upgrade().unwrap();
-                    if this.uid.load().is_none() { return ScopeState::Disposed; }
-                    if this.status.has_error() { return ScopeState::Failed; }
-                    if this.status.is_active() { return ScopeState::Active; }
+                    if this.uid.load().is_none() {
+                        return ScopeState::Disposed;
+                    }
+                    if this.status.has_error() {
+                        return ScopeState::Failed;
+                    }
+                    if this.status.is_active() {
+                        return ScopeState::Active;
+                    }
                     ScopeState::Pending
                 }),
                 disposed: Default::default(),
@@ -205,22 +261,29 @@ impl Lifecycle {
 
 impl Hash for Scope {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_usize(self.id());
-        state.write_usize(self.runtime.id());
+        <MainScope as Hash>::hash(&*self.runtime, state);
+        match self.id() {
+            None => state.write_i128(-1),
+            Some(id) => state.write_usize(id),
+        };
     }
 }
 
 impl PartialEq for Scope {
     fn eq(&self, other: &Self) -> bool {
-        self.runtime.plugin == other.runtime.plugin && self.id() == other.id()
+        self.runtime == other.runtime && self.id() == other.id()
     }
 }
 
 impl Eq for Scope {}
 
-
 impl Scope {
-    pub(crate) fn new<T: Send + Sync + ?Sized + 'static>(runtime: Arc<MainScope>, context: Arc<Cortex>, config: Arc<T>, worker_count: u8) -> Arc<Self> {
+    pub(crate) fn new<T: Send + Sync + ?Sized + 'static>(
+        runtime: Arc<MainScope>,
+        context: Arc<Cortex>,
+        config: Arc<T>,
+        worker_count: u8,
+    ) -> Arc<Self> {
         let id = context.registry.counter.fetch();
         let mut this = Arc::new(Self {
             context: Arc::downgrade(&context),
@@ -251,42 +314,64 @@ impl Scope {
         let cortex = this.context.upgrade().unwrap();
         this.ensure(move || {
             // freak I do the freaking unsafe magic to make it unwind safe
-            cve_rs::transmute::<Box<dyn Future<Output=Result<(), result::Error>> + Send + Unpin>,
-                Box<dyn Future<Output=Result<(), result::Error>> + Send + Sync + UnwindSafe + Unpin>>(
-                Box::new(rt.plugin.as_ref().unwrap().apply(cortex)
-                    .map(|r| r.map_err(result::Error::Other))
-                ))
+            cve_rs::transmute::<
+                Box<dyn Future<Output = Result<(), result::Error>> + Send + Unpin>,
+                Box<
+                    dyn Future<Output = Result<(), result::Error>>
+                        + Send
+                        + Sync
+                        + UnwindSafe
+                        + Unpin,
+                >,
+            >(Box::new(
+                rt.plugin
+                    .as_ref()
+                    .unwrap()
+                    .apply(cortex)
+                    .map(|r| r.map_err(result::Error::Other)),
+            ))
         });
     }
 
-    pub fn id(&self) -> usize {
+    #[deprecated(note = "this method is deprecated, please use `Scope::id()` instead")]
+    pub(crate) fn _id(&self) -> usize {
         self.lifecycle.id().unwrap_or(usize::MAX)
+    }
+
+    fn id(&self) -> Option<usize> {
+        self.lifecycle.id()
     }
 
     pub fn ensure<F, Fut>(&self, callback: F)
     where
         F: FnOnce() -> Fut + 'static,
         F: Send + Sync,
-        Fut: IntoFuture<Output=result::Result<()>>,
+        Fut: IntoFuture<Output = result::Result<()>>,
         <Fut as IntoFuture>::IntoFuture: Send + Sync + UnwindSafe,
     {
         let lifecycle = self.lifecycle.clone();
         let wrapped = async move {
-            let fut: Result<result::Result<()>, Box<dyn std::any::Any + Send>> = callback().into_future().catch_unwind().await;
+            let fut: Result<result::Result<()>, Box<dyn std::any::Any + Send>> =
+                callback().into_future().catch_unwind().await;
             match fut {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
                     lifecycle.set_error(err);
                 }
                 Err(e) => {
-                    lifecycle.set_error(result::Error::PnpPanic("panic when executing plugin lifecycle".to_string()));
+                    lifecycle.set_error(result::Error::PnpPanic(
+                        "panic when executing plugin lifecycle".to_string(),
+                    ));
                     std::panic::resume_unwind(e);
                     // self.lifecycle.error.replace(e);
                 }
             }
             lifecycle.state.update()
         };
-        self.lifecycle.tasker.sched(Task::new_blocking(Arc::from("anonymous"), Box::pin(wrapped)))
+        self.lifecycle.tasker.sched(Task::new_blocking(
+            Arc::from("anonymous"),
+            Box::pin(wrapped),
+        ))
         // const task = callback()
         //     .catch((reason) => {
         //         this.context.emit(this.ctx, 'internal/error', reason)
@@ -305,7 +390,10 @@ impl Scope {
     }
 
     pub(crate) fn assert_active(&self) -> result::Result<(), CrowdError> {
-        Ok(())
+        match self.id() {
+            None => Err(CrowdError::InactiveScope),
+            Some(_) => Ok(()),
+        }
     }
 
     fn ctx(&self) -> Arc<Cortex> {
@@ -316,7 +404,9 @@ impl Scope {
         let result = self.runtime.children.remove(self).is_some();
         self.lifecycle.notify_dispose();
         if self.runtime.children.is_empty() && self.runtime.plugin.is_some() {
-            self.ctx().registry.delete(self.runtime.plugin.as_ref().unwrap().deref());
+            self.ctx()
+                .registry
+                .delete(self.runtime.plugin.as_ref().unwrap().deref());
         }
         result
     }
@@ -336,12 +426,12 @@ impl UnwindSafe for Cortex {}
 
 impl PartialEq for Cortex {
     fn eq(&self, other: &Self) -> bool {
-        self.scope.id() == other.scope.id()
+        self.runtime() == other.runtime() &&
+        self.scope == other.scope
     }
 }
 
 impl Eq for Cortex {}
-
 
 impl Cortex {
     #[allow(invalid_value)]
@@ -353,12 +443,20 @@ impl Cortex {
             parent: weak.clone(),
             registry: Arc::new(Registry::new(weak.clone(), Arc::new(config.clone()))),
             scope: Arc::new(unsafe { MaybeUninit::uninit().assume_init() }),
-            actor: LateInit::new(|| (Cat { cortex: weak.clone() }).start()),
+            actor: LateInit::new(|| {
+                (Cat {
+                    cortex: weak.clone(),
+                })
+                .start()
+            }),
         });
         let runtime = MainScope::new(ctx.clone(), None::<()>);
         let scope = Scope::new(runtime, ctx.clone(), config, WORKER_COUNT);
         let arc: *mut Cortex = Arc::as_ptr(&ctx) as *mut _;
-        mem::forget(mem::replace(&mut (unsafe { arc.as_mut().unwrap() }).scope, scope));
+        mem::forget(mem::replace(
+            &mut (unsafe { arc.as_mut().unwrap() }).scope,
+            scope,
+        ));
         ctx
     }
 
@@ -366,7 +464,11 @@ impl Cortex {
         &self.scope.runtime
     }
 
-    pub fn plug<T: Send + Sync + 'static + std::panic::UnwindSafe>(&self, pluggable: impl Pluggable<T> + 'static, config: T) -> result::Result<Arc<Scope>> {
+    pub fn plug<T: Send + Sync + 'static + std::panic::UnwindSafe>(
+        &self,
+        pluggable: impl Pluggable<T> + 'static,
+        config: T,
+    ) -> result::Result<Arc<Scope>> {
         self.scope.assert_active()?;
         Ok(self.registry.plugin(pluggable, config))
     }
@@ -375,13 +477,14 @@ impl Cortex {
         &self.actor
     }
 
-    pub async fn serial<M, R>(&self, msg: M) -> color_eyre::Result<R>
+    pub async fn serial<M, R>(&self, msg: M) -> result::Result<R>
     where
-        M: Message<Result=color_eyre::Result<R>> + Send + 'static,
+        M: Message<Result = result::Result<R>> + Send + 'static,
         R: Send + actix::dev::MessageResponse<Cat, M>,
     {
         let actor = self.actor();
-        actor.send(msg).await?
+        let serial_result = actor.send(msg).await.unwrap();
+        serial_result
     }
 
     pub async fn run(self: Arc<Cortex>) {
@@ -393,7 +496,10 @@ impl Cortex {
 
 impl fmt::Display for Cortex {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Cortex<{}>", self.runtime().name.as_deref().unwrap_or("anonymous"))
+        write!(
+            f,
+            "Cortex<{}>",
+            self.runtime().name.as_deref().unwrap_or("anonymous")
+        )
     }
 }
-

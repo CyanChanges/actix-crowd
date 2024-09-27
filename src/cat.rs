@@ -2,6 +2,7 @@ use std::sync::{Arc, Weak};
 use actix::{Actor, Handler, Message};
 use actix::dev::MessageResponse;
 use crate::context::Cortex;
+use crate::result;
 
 pub(crate) struct Cat {
     pub(crate) cortex: Weak<Cortex>,
@@ -15,7 +16,7 @@ impl Cat {
 
 impl<M, R> Handler<M> for Cat
 where
-    M: Message<Result=color_eyre::Result<R>>,
+    M: Message<Result=result::Result<R>>,
     R: MessageResponse<Cat, M>,
 {
     type Result = R;

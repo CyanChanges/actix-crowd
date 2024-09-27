@@ -4,6 +4,18 @@ use async_trait::async_trait;
 use crate::any::KAny;
 use crate::context::{Cortex, MainScope, Scope, ScopeState};
 
+pub(crate) enum ToTrigger {
+    Emit(EventMessage),
+    Parallel(EventMessage),
+    Bail(EventMessage),
+    Serial(EventMessage),
+}
+
+pub enum EventMatcher {
+    UserEvent(String),
+    BuiltinEvent(String)
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub enum InternalEvent {
     Fork(Arc<Scope>),
@@ -52,8 +64,8 @@ pub enum EventMessage {
 #[derive(Clone)]
 pub struct UserEvent(String, Arc<dyn KAny>);
 impl UserEvent {
-    pub fn new(name: impl Into<String>, args: impl KAny) -> Self {
-        UserEvent(name.into(), Arc::new(args))
+    pub fn new(name: impl Into<String>, args: impl KAny) -> EventMessage {
+        EventMessage::User(UserEvent(name.into(), Arc::new(args)))
     }
 
     pub fn name(&self) -> &str {
@@ -93,7 +105,7 @@ impl EventMessage {
         EventMessage::Builtin(evt)
     }
 
-    /// Creates a new `EventMessage` representing a user event with the given name and arguments.
+    /// Creates a new `EventMessage` representing a custom user event with the given name and arguments.
     ///
     /// # Arguments
     ///
