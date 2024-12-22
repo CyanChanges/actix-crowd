@@ -1,5 +1,9 @@
 # actix-crowd
 
+All rights reserved by Cyan Changes (c) 2024.
+You are not allowed to use any content of this repository in yours,
+unless you have explict authorization.
+
 Make a crowd.
 
 <div align="center">
